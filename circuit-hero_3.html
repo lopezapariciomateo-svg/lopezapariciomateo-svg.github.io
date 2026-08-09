@@ -139,7 +139,7 @@
   .diff-btn.active[data-diff="medium"]{ border-color:var(--lane2); color:var(--lane2); background:rgba(255,183,3,0.08); }
   .diff-btn.active[data-diff="hard"]{ border-color:var(--lane1); color:var(--lane1); background:rgba(255,77,109,0.08); }
 
-  /* ---------- CHART LIST ---------- */
+  /* ---------- CHART LIST / SEARCH RESULTS ---------- */
   .chart-card{
     border:1px solid var(--trace); border-radius:8px; padding:10px 12px;
     margin-bottom:8px; cursor:pointer; transition:border-color .15s ease, background .15s ease;
@@ -154,6 +154,23 @@
     border:1px solid var(--trace); border-radius:4px; padding:2px 6px;
   }
   .chart-card-desc{ font-family:'Space Mono'; font-size:10.5px; color:var(--muted); line-height:1.5; }
+  #trackResults{ margin-top:8px; max-height:220px; overflow-y:auto; }
+
+  /* ---------- CALIBRATION ---------- */
+  #calibrateOverlay .title{ font-size:28px; }
+  #calibrateOverlay .subtitle{ margin-bottom:22px; }
+  #tapZone{
+    width:140px; height:140px; border-radius:50%; border:2px solid var(--lane2);
+    display:flex; align-items:center; justify-content:center; margin:0 auto 20px;
+    font-family:'Chakra Petch'; font-weight:700; font-size:15px; letter-spacing:1px;
+    color:var(--lane2); user-select:none; transition:transform .08s ease, background .08s ease;
+  }
+  #tapZone.pulse{ transform:scale(0.92); background:rgba(255,183,3,0.15); }
+  #calibReadout{
+    font-family:'Space Mono'; font-size:13px; color:var(--text); margin-bottom:22px;
+    line-height:2;
+  }
+  #calibReadout b{ color:var(--lane3); font-size:20px; }
 
   input[type="file"]{
     font-family:'Space Mono'; font-size:11px; color:var(--muted);
@@ -250,8 +267,19 @@
       </div>
 
       <div class="panel">
-        <h3>02 — CHART (de la playlist "Arg")</h3>
-        <div id="chartList"></div>
+        <h3>02 — BUSCAR CANCIÓN</h3>
+        <div class="row" style="gap:8px;">
+          <input type="text" id="trackSearchInput" placeholder="nombre de la canción o artista"
+                 style="flex:1; background:var(--bg); border:1px solid var(--trace); color:var(--text); font-family:'Space Mono'; font-size:12px; padding:8px; border-radius:6px;">
+          <button id="trackSearchBtn" style="padding:8px 14px; font-size:12px;">BUSCAR</button>
+        </div>
+        <div id="trackResults"></div>
+        <div id="selectedTrackBox" class="hidden" style="margin-top:10px; padding:10px; border:1px solid var(--lane3); border-radius:7px; background:rgba(61,220,132,0.07);">
+          <div style="font-family:'Space Mono'; font-size:10px; color:var(--muted); margin-bottom:3px;">TEMA ELEGIDO</div>
+          <div id="selectedTrackName" style="font-family:'Chakra Petch'; font-weight:600; font-size:13px;"></div>
+          <button id="calibrateBtn" class="ghost" style="width:100%; margin-top:8px;">🎯 CALIBRAR RITMO</button>
+          <div id="calibrationStatus" style="font-family:'Space Mono'; font-size:10.5px; color:var(--muted); margin-top:6px;">sin calibrar todavía</div>
+        </div>
       </div>
 
       <div class="panel">
@@ -271,6 +299,22 @@
         <div class="keycap" style="color:var(--lane4)">K</div>
         <div class="keycap" style="color:var(--lane5)">L</div>
       </div>
+    </div>
+
+    <!-- ---------- CALIBRATION ---------- -->
+    <div id="calibrateOverlay" class="overlay hidden">
+      <div class="title">CALIBRAR RITMO</div>
+      <div class="subtitle" id="calibSubtitle">TOCÁ ESPACIO (O CLICKEÁ EL CÍRCULO) SIGUIENDO EL RITMO</div>
+
+      <div id="tapZone">TOCÁ<br>ACÁ</div>
+
+      <div id="calibReadout">
+        Toques: <b id="calibTapCount">0</b> · BPM detectado: <b id="calibBpm">—</b>
+      </div>
+
+      <button id="calibDoneBtn" disabled>USAR ESTE RITMO</button>
+      <button id="calibRestartBtn" class="ghost">REINICIAR TOQUES</button>
+      <button id="calibCancelBtn" class="ghost">CANCELAR</button>
     </div>
 
     <!-- ---------- COUNTDOWN ---------- -->
@@ -396,7 +440,20 @@
   const spotifyClientIdInput = document.getElementById('spotifyClientId');
   const spotifyConnectBtn = document.getElementById('spotifyConnectBtn');
   const spotifyStatus = document.getElementById('spotifyStatus');
-  const chartListEl = document.getElementById('chartList');
+  const trackSearchInput = document.getElementById('trackSearchInput');
+  const trackSearchBtn = document.getElementById('trackSearchBtn');
+  const trackResultsEl = document.getElementById('trackResults');
+  const selectedTrackBox = document.getElementById('selectedTrackBox');
+  const selectedTrackName = document.getElementById('selectedTrackName');
+  const calibrateBtn = document.getElementById('calibrateBtn');
+  const calibrationStatus = document.getElementById('calibrationStatus');
+  const calibrateOverlay = document.getElementById('calibrateOverlay');
+  const tapZone = document.getElementById('tapZone');
+  const calibTapCount = document.getElementById('calibTapCount');
+  const calibBpm = document.getElementById('calibBpm');
+  const calibDoneBtn = document.getElementById('calibDoneBtn');
+  const calibRestartBtn = document.getElementById('calibRestartBtn');
+  const calibCancelBtn = document.getElementById('calibCancelBtn');
   const scoreLabel = document.getElementById('score');
   const comboLabel = document.getElementById('combo');
   const accuracyPopup = document.getElementById('accuracy');
@@ -427,11 +484,13 @@
     HEALTH_START = p.healthStart;
   }
 
-  // ---------------- CHART LIBRARY (hand-designed by Claude) ----------------
-  // Each chart is a deterministic rhythm pattern at a given tempo/duration —
-  // no audio analysis, no manual editing. The player just picks one and plays
-  // it against whatever song they load.
-  function buildDesignedChart(bpm, durationSec, patternName){
+  // ---------------- CHART GENERATION (tap-calibrated to the real song) ----------------
+  // Since Spotify killed audio-features/audio-analysis for new apps (Nov 2024) and the
+  // Web Playback SDK audio is DRM-protected (no raw samples to analyze), we can't get
+  // real beat data automatically for ANY song. Instead: the player taps along with the
+  // actual playing track, we measure the real BPM + phase from those taps, and generate
+  // the note pattern locked to that measured rhythm.
+  function buildDesignedChart(bpm, durationSec, patternName, phaseOffsetSec){
     const beat = 60/bpm;
     const patterns = {
       steady:  [0,2,4,2],
@@ -442,7 +501,10 @@
     };
     const seq = patterns[patternName] || patterns.steady;
     const notes = [];
-    let t = 1.6;
+    // align the grid to the measured phase (the moment of the player's first tap)
+    // so notes land on the actual downbeats of the song, not an arbitrary offset
+    let t = (phaseOffsetSec || 0) % beat;
+    while(t < 1.4) t += beat;
     let idx = 0;
     while(t < durationSec - 1){
       notes.push({ time: Math.round(t*1000)/1000, lane: seq[idx % seq.length] });
@@ -452,65 +514,159 @@
     return notes;
   }
 
-  const CHART_LIBRARY = [
-    {
-      id:'domingo', name:'DOM1NGO — Milo j', tag:'Para empezar',
-      bpm:86, duration:189, pattern:'steady', spotifyUri:'spotify:track:7Ec2XdY7cs14ONZMgsDx4K',
-      desc:'86 BPM · ritmo tranqui y parejo, ideal para agarrarle la mano a los 5 carriles.'
-    },
-    {
-      id:'tranky', name:'TRANKY FUNKY — Trueno', tag:'Intermedio',
-      bpm:110, duration:158, pattern:'edges', spotifyUri:'spotify:track:28iQz5gnZyqhUebzeOYCwH',
-      desc:'110 BPM · acentos marcados en los carriles D y L, bien funky.'
-    },
-    {
-      id:'tuuuyo', name:'TUUUYO — YSY A, Bhavi, DrefQuila', tag:'Intermedio',
-      bpm:100, duration:204, pattern:'swing', spotifyUri:'spotify:track:57WroSoheS9bWCtALlXA1t',
-      desc:'100 BPM · tema largo con un patrón que se mueve por todos los carriles.'
-    },
-    {
-      id:'mamichula', name:'Mamichula — Trueno, Nicki Nicole, Bizarrap', tag:'Resistencia',
-      bpm:93, duration:219, pattern:'runs', spotifyUri:'spotify:track:0TUW9faHNaBmi89wsYGp9y',
-      desc:'93 BPM · el más largo de la lista, corridas constantes de punta a punta.'
-    },
-    {
-      id:'ojosverdes', name:'Ojos Verdes — Nicki Nicole', tag:'Difícil',
-      bpm:168, duration:142, pattern:'dense', spotifyUri:'spotify:track:2RmtEc2ZNDCzAU3vH0AbKx',
-      desc:'168 BPM · el tema más rápido de la playlist, notas densas y cruzadas.'
+  const PATTERN_BY_DIFFICULTY = { easy:'steady', medium:'runs', hard:'dense' };
+
+  // ---- track search ----
+  let selectedTrack = null; // {uri, name, artists, durationSec}
+
+  async function searchTracks(query){
+    const res = await spotifyApiCall('/search?type=track&limit=8&q='+encodeURIComponent(query), 'GET');
+    const data = await res.json();
+    return (data.tracks && data.tracks.items) || [];
+  }
+
+  trackSearchBtn.addEventListener('click', doTrackSearch);
+  trackSearchInput.addEventListener('keydown', (e)=>{ if(e.key === 'Enter') doTrackSearch(); });
+
+  async function doTrackSearch(){
+    const q = trackSearchInput.value.trim();
+    if(!q) return;
+    if(!spotifyReady){
+      alert('Conectá tu cuenta de Spotify primero.');
+      return;
     }
-  ];
-  // precompute the note arrays once
-  CHART_LIBRARY.forEach(c=>{ c.notes = buildDesignedChart(c.bpm, c.duration, c.pattern); });
+    trackSearchBtn.disabled = true;
+    trackSearchBtn.textContent = '...';
+    try{
+      const items = await searchTracks(q);
+      renderTrackResults(items);
+    }catch(err){
+      console.error(err);
+      trackResultsEl.innerHTML = '<div class="chart-card-desc">Error buscando en Spotify.</div>';
+    }
+    trackSearchBtn.disabled = false;
+    trackSearchBtn.textContent = 'BUSCAR';
+  }
 
-  let selectedChartId = CHART_LIBRARY[0].id;
-
-  function renderChartList(){
-    chartListEl.innerHTML = '';
-    CHART_LIBRARY.forEach(c=>{
+  function renderTrackResults(items){
+    trackResultsEl.innerHTML = '';
+    if(!items.length){
+      trackResultsEl.innerHTML = '<div class="chart-card-desc">Sin resultados.</div>';
+      return;
+    }
+    items.forEach(track=>{
+      const artists = track.artists.map(a=>a.name).join(', ');
+      const mins = Math.floor(track.duration_ms/60000);
+      const secs = Math.floor((track.duration_ms%60000)/1000).toString().padStart(2,'0');
       const card = document.createElement('div');
-      card.className = 'chart-card' + (c.id === selectedChartId ? ' active' : '');
-      card.dataset.id = c.id;
-      const mins = Math.floor(c.duration/60), secs = (c.duration%60).toString().padStart(2,'0');
+      card.className = 'chart-card';
       card.innerHTML = `
         <div class="chart-card-top">
-          <span class="chart-card-name">${c.name}</span>
-          <span class="chart-card-tag">${c.tag} · ${mins}:${secs}</span>
+          <span class="chart-card-name">${track.name}</span>
+          <span class="chart-card-tag">${mins}:${secs}</span>
         </div>
-        <div class="chart-card-desc">${c.desc}</div>
+        <div class="chart-card-desc">${artists}</div>
       `;
-      card.addEventListener('click', ()=>{
-        selectedChartId = c.id;
-        renderChartList();
-      });
-      chartListEl.appendChild(card);
+      card.addEventListener('click', ()=>selectTrack(track));
+      trackResultsEl.appendChild(card);
     });
   }
-  renderChartList();
+
+  function selectTrack(track){
+    selectedTrack = {
+      uri: track.uri,
+      name: track.name,
+      artists: track.artists.map(a=>a.name).join(', '),
+      durationSec: track.duration_ms/1000
+    };
+    calibration = null; // switching songs invalidates any previous calibration
+    selectedTrackName.textContent = selectedTrack.name + ' — ' + selectedTrack.artists;
+    selectedTrackBox.classList.remove('hidden');
+    calibrationStatus.textContent = 'sin calibrar todavía';
+    calibrationStatus.style.color = 'var(--muted)';
+  }
 
   function buildChart(){
-    const c = CHART_LIBRARY.find(c=>c.id === selectedChartId) || CHART_LIBRARY[0];
-    chart = c.notes.map(n=>({...n, hit:false, missed:false}));
+    const bpm = calibration ? calibration.bpm : 100;
+    const phase = calibration ? calibration.phase : 0;
+    const duration = selectedTrack ? selectedTrack.durationSec : 90;
+    const pattern = PATTERN_BY_DIFFICULTY[currentDifficulty] || 'runs';
+    chart = buildDesignedChart(bpm, duration, pattern, phase).map(n=>({...n, hit:false, missed:false}));
   }
+
+  // ---- tap-tempo calibration ----
+  let calibration = null; // {bpm, phase}
+  let tapTimes = [];      // song-position seconds of each tap
+
+  calibrateBtn.addEventListener('click', async ()=>{
+    if(!selectedTrack) return;
+    tapTimes = [];
+    calibTapCount.textContent = '0';
+    calibBpm.textContent = '—';
+    calibDoneBtn.disabled = true;
+    setupEl.classList.add('hidden');
+    calibrateOverlay.classList.remove('hidden');
+    try{
+      await playTrackOnDevice(selectedTrack.uri);
+      cachedPosition = 0; cachedPosAt = performance.now(); cachedPaused = false;
+    }catch(err){
+      console.error(err);
+    }
+  });
+
+  function registerTap(){
+    const t = currentSongTime();
+    tapTimes.push(t);
+    calibTapCount.textContent = tapTimes.length;
+    tapZone.classList.add('pulse');
+    setTimeout(()=>tapZone.classList.remove('pulse'), 80);
+
+    if(tapTimes.length >= 2){
+      const intervals = [];
+      for(let i=1;i<tapTimes.length;i++) intervals.push(tapTimes[i]-tapTimes[i-1]);
+      intervals.sort((a,b)=>a-b);
+      const median = intervals[Math.floor(intervals.length/2)];
+      const bpm = Math.round(60/median);
+      calibBpm.textContent = bpm + ' BPM';
+    }
+    if(tapTimes.length >= 8) calibDoneBtn.disabled = false;
+  }
+
+  tapZone.addEventListener('click', registerTap);
+
+  window.addEventListener('keydown', (e)=>{
+    if(!calibrateOverlay.classList.contains('hidden') && e.code === 'Space'){
+      e.preventDefault();
+      registerTap();
+    }
+  });
+
+  calibRestartBtn.addEventListener('click', ()=>{
+    tapTimes = [];
+    calibTapCount.textContent = '0';
+    calibBpm.textContent = '—';
+    calibDoneBtn.disabled = true;
+  });
+
+  calibDoneBtn.addEventListener('click', async ()=>{
+    const intervals = [];
+    for(let i=1;i<tapTimes.length;i++) intervals.push(tapTimes[i]-tapTimes[i-1]);
+    intervals.sort((a,b)=>a-b);
+    const median = intervals[Math.floor(intervals.length/2)];
+    const bpm = Math.max(50, Math.min(220, Math.round(60/median)));
+    calibration = { bpm, phase: tapTimes[0] };
+    if(spotifyPlayer) spotifyPlayer.pause();
+    calibrateOverlay.classList.add('hidden');
+    setupEl.classList.remove('hidden');
+    calibrationStatus.textContent = `calibrado: ${bpm} BPM ✓`;
+    calibrationStatus.style.color = '#3ddc84';
+  });
+
+  calibCancelBtn.addEventListener('click', ()=>{
+    if(spotifyPlayer) spotifyPlayer.pause();
+    calibrateOverlay.classList.add('hidden');
+    setupEl.classList.remove('hidden');
+  });
 
   // ==================== SPOTIFY AUTH (PKCE, sin backend) ====================
   const SPOTIFY_REDIRECT_URI = window.location.origin + window.location.pathname;
@@ -654,13 +810,20 @@
       alert('Primero conectá tu cuenta de Spotify (arriba) y esperá a que diga "CONECTADO ✓".');
       return;
     }
+    if(!selectedTrack){
+      alert('Buscá y elegí una canción primero.');
+      return;
+    }
+    if(!calibration){
+      alert('Todavía no calibraste el ritmo de esta canción — tocá "🎯 CALIBRAR RITMO" antes de empezar.');
+      return;
+    }
     startBtn.disabled = true;
     startBtn.textContent = 'CARGANDO...';
     try{
       applyDifficulty();
       buildChart();
-      const c = CHART_LIBRARY.find(c=>c.id === selectedChartId) || CHART_LIBRARY[0];
-      await playTrackOnDevice(c.spotifyUri);
+      await playTrackOnDevice(selectedTrack.uri);
       await spotifyPlayer.pause(); // start paused, countdown will trigger real playback
       await spotifyApiCall('/me/player/seek?position_ms=0&device_id='+spotifyDeviceId, 'PUT');
       setupEl.classList.add('hidden');
